@@ -162,8 +162,76 @@ function choose(candidates) {
   return best.values;
 }
 
+function arithmeticFallback(passes) {
+  const boxes = [];
+  passes.forEach((pass, passIndex) => {
+    for (const item of mergeLineWords(wordsFromTsv(pass, passIndex))) {
+      const value = numericValue(item.text);
+      if (value !== null && value >= 1000 && value <= 20000000) boxes.push({ ...item, value });
+    }
+  });
+  const byValue = new Map();
+  for (const box of boxes) if (!byValue.has(box.value) || box.conf > byValue.get(box.value).conf) byValue.set(box.value, box);
+  const unique = [...byValue.values()].slice(0, 180);
+  let best = null;
+  for (const gross of unique) for (const deductions of unique) {
+    if (gross === deductions || gross.value < 50000 || gross.value <= deductions.value || deductions.value < 3000) continue;
+    if (deductions.value < gross.value * .05) continue;
+    for (const net of unique) {
+      if (net === gross || net === deductions) continue;
+      const difference = Math.abs(gross.value - deductions.value - net.value);
+      const allowance = Math.max(8, gross.value * .0015);
+      if (difference > allowance) continue;
+      if (net.value < 30000) continue;
+      const basics = unique.filter(item => item !== gross && item !== deductions && item !== net && item.value >= Math.max(30000, gross.value * .35) && item.value <= gross.value * 1.05);
+      for (const basic of basics) {
+        let score = 260 - difference / allowance * 80;
+        score += Math.max(0, 45 - Math.abs(gross.value - basic.value) / gross.value * 120);
+        if (basic.cy < gross.cy) score += 22;
+        if (deductions.cy > gross.cy) score += 14;
+        if (Math.abs(gross.cy - net.cy) < Math.max(gross.h, net.h) * 8) score += 18;
+        if (!best || score > best.score) best = { score, values: { basic: basic.value, gross: gross.value, deductions: deductions.value, net: net.value } };
+      }
+    }
+  }
+  if (best?.score >= 270) return best.values;
+  let inferred = null;
+  for (const basic of unique) for (const extra of unique) {
+    if (basic === extra || basic.value < 50000 || extra.value < 1000 || extra.value > basic.value * .25) continue;
+    const grossValue = basic.value + extra.value;
+    for (const deductions of unique) {
+      if ([basic, extra].includes(deductions) || deductions.value < 3000 || deductions.value > grossValue * .6) continue;
+      if (deductions.value < grossValue * .05) continue;
+      if (basic.cy >= deductions.cy || extra.cy < basic.cy || extra.cy > deductions.cy) continue;
+      const netValue = grossValue - deductions.value;
+      for (const observedNet of unique) {
+        if ([basic, extra, deductions].includes(observedNet)) continue;
+        const distance = editDistance(String(observedNet.value), String(netValue));
+        const relative = Math.abs(observedNet.value - netValue) / netValue;
+        if (!(distance <= 1 || (distance <= 2 && relative <= .08))) continue;
+        let score = 270 - distance * 26 - Math.min(50, relative * 80);
+        const grossObserved = unique.some(item => item !== basic && item !== extra && item.value === grossValue);
+        if (grossObserved) score += 70;
+        const deductionRatio = deductions.value / grossValue;
+        if (deductionRatio >= .08 && deductionRatio <= .4) score += 15;
+        if (deductionRatio > .45) score -= 40;
+        if (basic.cy < deductions.cy) score += 18;
+        if (extra.cy >= basic.cy && extra.cy <= deductions.cy) score += 14;
+        if (observedNet.cx > basic.cx) score += 10;
+        if (!inferred || score > inferred.score) inferred = { score, values: { basic: basic.value, gross: grossValue, deductions: deductions.value, net: netValue } };
+      }
+    }
+  }
+  return inferred?.score >= 230 ? inferred.values : {};
+}
+
 export function extractAmounts(data) {
   const passes = Array.isArray(data?.passes) ? data.passes : [data || {}], candidates = [];
   passes.forEach((pass, index) => candidates.push(...spatialCandidates(pass, index), ...textCandidates(pass, index)));
-  return choose(candidates);
+  const labelled = choose(candidates);
+  const labelledComplete = Object.keys(labelled).length === 4;
+  const labelledConsistent = labelledComplete && labelled.basic <= labelled.gross * 1.05 && Math.abs(labelled.gross - labelled.deductions - labelled.net) <= 20;
+  if (labelledConsistent) return labelled;
+  const fallback = arithmeticFallback(passes);
+  return Object.keys(fallback).length === 4 ? fallback : labelled;
 }

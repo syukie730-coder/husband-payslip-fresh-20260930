@@ -20,8 +20,8 @@
 ## 安定性
 
 - index.htmlにトップ画面を直接記述。起動時にOCR・HEIC・グラフ用コードを待ちません。
-- OCRは写真を選択したときだけ別の処理画面とWorkerで実行。150秒の上限・中止ボタン付き。
-- 保存用画像とは別に長辺3400pxの読み取り用画像を作り、明るさ・コントラスト・罫線を補正します。全体で不足した場合だけ左右に分けて再確認します。
+- OCRは写真を選択したときだけ別の処理画面とWorkerで実行。210秒の上限・中止ボタン付き。
+- 保存用画像とは別に用紙部分を自動で切り出し、長辺2600〜3400pxの読み取り用画像を作ります。明るさ・局所コントラスト・罫線を補正し、全体で不足した場合だけ重なり付きの4区画を拡大して再確認します。
 - 表の見出しと離れた金額を位置で結び、支給合計−控除合計と振込支給額の関係も候補選びに使用します。
 - HEICはブラウザの標準読み込みを先に試し、必要な場合だけ変換部品を別画面で読み込みます。変換上限45秒。
 - heic2any内のコード生成処理に必要な `unsafe-eval` は、HEIC専用の処理画面だけで許可。メイン画面・OCR画面には許可せず、HEIC処理画面からのネットワーク接続も禁止。
@@ -47,6 +47,6 @@ GitHub Pagesのmain / rootで配信可能。ビルドやサーバー処理は不
 ## 利用部品
 
 - [Tesseract.js 6.0.1](https://github.com/naptha/tesseract.js) / Tesseract.js-core 6.0.0（Apache-2.0、同梱ライセンス参照）
-- [Tesseract fast traineddata](https://github.com/tesseract-ocr/tessdata_fast)（日本語・英語、Apache-2.0）
+- [Tesseract traineddata](https://github.com/tesseract-ocr/tessdata_best)（日本語は高精度版、英語は軽量版、Apache-2.0）
 - [heic2any 0.0.4](https://github.com/alexcorvi/heic2any)（MIT、同梱ライセンス参照）
 - アイコン：内蔵imagegenで新規生成。APIキー・従量課金APIは使用していません。

@@ -30,12 +30,14 @@ function enhance(image, binary = false) {
   context.drawImage(image, 0, 0);
   const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
   const data = pixels.data;
+  const total = canvas.width * canvas.height;
+  const grays = new Uint8Array(total);
   const histogram = new Uint32Array(256);
-  for (let i = 0; i < data.length; i += 4) {
+  for (let i = 0, pixel = 0; i < data.length; i += 4, pixel++) {
     const gray = Math.round(data[i] * .299 + data[i + 1] * .587 + data[i + 2] * .114);
+    grays[pixel] = gray;
     histogram[gray]++;
   }
-  const total = canvas.width * canvas.height;
   const percentile = target => {
     let count = 0;
     for (let i = 0; i < 256; i++) {
@@ -47,28 +49,28 @@ function enhance(image, binary = false) {
   let low = percentile(.015);
   const high = percentile(.985);
   if (high - low < 36) low = Math.max(0, high - 100);
-  let threshold = 190;
+  let integral;
   if (binary) {
-    let sum = 0;
-    for (let i = 0; i < 256; i++) sum += i * histogram[i];
-    let background = 0, weightBackground = 0, best = -1;
-    for (let i = 0; i < 256; i++) {
-      weightBackground += histogram[i];
-      if (!weightBackground) continue;
-      const weightForeground = total - weightBackground;
-      if (!weightForeground) break;
-      background += i * histogram[i];
-      const meanBackground = background / weightBackground;
-      const meanForeground = (sum - background) / weightForeground;
-      const between = weightBackground * weightForeground * (meanBackground - meanForeground) ** 2;
-      if (between > best) { best = between; threshold = i; }
+    const stride = canvas.width + 1;
+    integral = new Uint32Array(stride * (canvas.height + 1));
+    for (let y = 1; y <= canvas.height; y++) {
+      let rowSum = 0;
+      for (let x = 1; x <= canvas.width; x++) {
+        rowSum += grays[(y - 1) * canvas.width + x - 1];
+        integral[y * stride + x] = integral[(y - 1) * stride + x] + rowSum;
+      }
     }
-    threshold = Math.min(220, Math.max(115, threshold + 8));
   }
-  for (let i = 0; i < data.length; i += 4) {
-    let gray = Math.round(data[i] * .299 + data[i + 1] * .587 + data[i + 2] * .114);
-    gray = Math.max(0, Math.min(255, (gray - low) * 255 / (high - low)));
-    if (binary) gray = gray < threshold ? 0 : 255;
+  const radius = Math.max(18, Math.round(Math.min(canvas.width, canvas.height) / 55));
+  for (let i = 0, pixel = 0; i < data.length; i += 4, pixel++) {
+    let gray = grays[pixel];
+    if (binary) {
+      const x = pixel % canvas.width, y = Math.floor(pixel / canvas.width);
+      const x1 = Math.max(0, x - radius), y1 = Math.max(0, y - radius), x2 = Math.min(canvas.width - 1, x + radius), y2 = Math.min(canvas.height - 1, y + radius), stride = canvas.width + 1;
+      const sum = integral[(y2 + 1) * stride + x2 + 1] - integral[y1 * stride + x2 + 1] - integral[(y2 + 1) * stride + x1] + integral[y1 * stride + x1];
+      const mean = sum / ((x2 - x1 + 1) * (y2 - y1 + 1));
+      gray = gray < mean - 11 ? 0 : 255;
+    } else gray = Math.max(0, Math.min(255, (gray - low) * 255 / (high - low)));
     data[i] = data[i + 1] = data[i + 2] = gray;
     data[i + 3] = 255;
   }
@@ -90,21 +92,27 @@ function enhance(image, binary = false) {
   return canvas;
 }
 
-function crop(source, x, width) {
+function crop(source, x, y, width, height, scale = 1) {
   const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = source.height;
-  canvas.getContext('2d').drawImage(source, x, 0, width, source.height, 0, 0, width, source.height);
+  canvas.width = Math.round(width * scale);
+  canvas.height = Math.round(height * scale);
+  const context = canvas.getContext('2d');
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = 'high';
+  context.drawImage(source, x, y, width, height, 0, 0, canvas.width, canvas.height);
   return canvas;
 }
 
-function moveTsv(tsv, xOffset, blockOffset) {
+function moveTsv(tsv, xOffset, yOffset, scale, blockOffset) {
   const lines = String(tsv || '').split('\n');
   return lines.slice(1).map(line => {
     const columns = line.split('\t');
     if (columns.length < 12) return line;
     columns[2] = String((Number(columns[2]) || 0) + blockOffset);
-    columns[6] = String((Number(columns[6]) || 0) + xOffset);
+    columns[6] = String(Math.round((Number(columns[6]) || 0) / scale + xOffset));
+    columns[7] = String(Math.round((Number(columns[7]) || 0) / scale + yOffset));
+    columns[8] = String(Math.round((Number(columns[8]) || 0) / scale));
+    columns[9] = String(Math.round((Number(columns[9]) || 0) / scale));
     return columns.join('\t');
   }).join('\n');
 }
@@ -152,22 +160,43 @@ window.addEventListener('message', async event => {
       pass = 2;
       send('progress', { text: '表と小さい文字を別の方法で確認しています（2/2）…' });
       await worker.setParameters({ tessedit_pageseg_mode: '6' });
-      canvas = enhance(image, false);
-      const overlap = Math.round(canvas.width * .08);
-      const split = Math.round(canvas.width / 2);
-      const left = crop(canvas, 0, split + overlap);
-      const rightX = split - overlap;
-      const right = crop(canvas, rightX, canvas.width - rightX);
-      const leftResult = await worker.recognize(left, {}, { text: true, tsv: true });
-      const rightResult = await worker.recognize(right, {}, { text: true, tsv: true });
-      const header = String(leftResult.data.tsv || '').split('\n')[0];
+      canvas = enhance(image, true);
+      const overlapX = Math.round(canvas.width * .09), overlapY = Math.round(canvas.height * .09);
+      const halfW = Math.round(canvas.width / 2), halfH = Math.round(canvas.height / 2);
+      const tiles = [
+        { x: 0, y: 0, w: halfW + overlapX, h: halfH + overlapY },
+        { x: halfW - overlapX, y: 0, w: canvas.width - halfW + overlapX, h: halfH + overlapY },
+        { x: 0, y: halfH - overlapY, w: halfW + overlapX, h: canvas.height - halfH + overlapY },
+        { x: halfW - overlapX, y: halfH - overlapY, w: canvas.width - halfW + overlapX, h: canvas.height - halfH + overlapY }
+      ];
+      const texts = [], tsvParts = [];
+      let header = '';
+      for (let index = 0; index < tiles.length; index++) {
+        const tile = tiles[index], tileScale = Math.min(1.65, 2300 / tile.w);
+        const tileCanvas = crop(canvas, tile.x, tile.y, tile.w, tile.h, tileScale);
+        const tileResult = await worker.recognize(tileCanvas, {}, { text: true, tsv: true });
+        if (!header) header = String(tileResult.data.tsv || '').split('\n')[0];
+        texts.push(tileResult.data.text || '');
+        tsvParts.push(moveTsv(tileResult.data.tsv, tile.x, tile.y, tileScale, (index + 1) * 1000));
+        tileCanvas.width = tileCanvas.height = 1;
+      }
+      await worker.setParameters({ tessedit_pageseg_mode: '11', tessedit_char_whitelist: '0123456789,.¥￥円' });
+      const numberResult = await worker.recognize(canvas, {}, { text: true, tsv: true });
+      texts.push(numberResult.data.text || '');
+      tsvParts.push(moveTsv(numberResult.data.tsv, 0, 0, 1, 9000));
+      const summaryX = Math.round(canvas.width * .5), summaryY = Math.round(canvas.height * .28), summaryW = canvas.width - summaryX, summaryH = canvas.height - summaryY;
+      const summaryScale = Math.min(2.35, 2500 / summaryW);
+      const summaryCanvas = crop(canvas, summaryX, summaryY, summaryW, summaryH, summaryScale);
+      const summaryResult = await worker.recognize(summaryCanvas, {}, { text: true, tsv: true });
+      texts.push(summaryResult.data.text || '');
+      tsvParts.push(moveTsv(summaryResult.data.tsv, summaryX, summaryY, summaryScale, 10000));
+      summaryCanvas.width = summaryCanvas.height = 1;
       passes.push({
-        text: `${leftResult.data.text || ''}\n${rightResult.data.text || ''}`,
-        tsv: `${header}\n${moveTsv(leftResult.data.tsv, 0, 1000)}\n${moveTsv(rightResult.data.tsv, rightX, 2000)}`,
+        text: texts.join('\n'),
+        tsv: `${header}\n${tsvParts.join('\n')}`,
         width: canvas.width,
         height: canvas.height
       });
-      left.width = left.height = right.width = right.height = 1;
     }
     canvas.width = canvas.height = 1;
     await worker.terminate();
