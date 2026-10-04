@@ -25,6 +25,8 @@ self.onmessage=async({data})=>{
   if(started)return;started=true;
   const send=(type,extra={})=>postMessage({type,job:data.job,...extra});
   let ocr,source;
+  let phase="OCR部品の準備";
+  const diagnostic=value=>{try{send("diagnostic",{value});}catch{}};
   try {
     const assets=new URL('./vendor/paddle/',import.meta.url).href;
     const localFetch=(url,options)=>{
@@ -45,16 +47,20 @@ self.onmessage=async({data})=>{
     source=cv.matFromImageData(new ImageData(new Uint8ClampedArray(data.pixels),data.width,data.height));
     send('progress',{text:'文字の位置と傾きを調べ、1行ずつ読み取っています…'});
     const start=performance.now();
+    phase="文字の検出・認識";
     const [result]=await ocr.predict(source,{textDetLimitSideLen:1280,textDetLimitType:'max',textDetUnclipRatio:2.0,textRecScoreThresh:.5});
     const candidates=[...monthCandidates(result.items),...amountCandidates(result.items)];
     const verified=new Map();
+    const traces=new Map(candidates.map(c=>[c,{key:c.key,label:c.label?.name||"年月",text:c.item.text,score:c.item.score,value:c.value,reason:"確認上限（30候補）により未確認"}]));
+    phase="候補の再読取";
     // Bounded verification work keeps dense documents from creating unbounded loops.
     for(const candidate of candidates.slice(0,30)) {
       // Require actual source detail, not enlarged pixels. The recognizer normalizes
       // lines to 48px; very small originals can confidently repeat a wrong digit.
       const p=candidate.item.poly;
       const height=Math.min(Math.hypot(p[3][0]-p[0][0],p[3][1]-p[0][1]),Math.hypot(p[2][0]-p[1][0],p[2][1]-p[1][1]));
-      if(height<32)continue;
+      const trace=traces.get(candidate);trace.height=Math.round(height*10)/10;
+      if(height<32){trace.reason="文字の高さが32px未満";continue;}
       const id=JSON.stringify(candidate.item.poly);
       if(!verified.has(id)) {
         send('progress',{text:'読めた年月と金額を、元の画像でもう一度確認しています…'});
@@ -63,17 +69,21 @@ self.onmessage=async({data})=>{
         finally {crop.delete();}
       }
       const check=verified.get(id);
-      if(!check || check.score<.90)continue;
+      trace.checkText=check?.text;trace.checkScore=check?.score;
+      if(!check || check.score<.90){trace.reason="再読取の確信度が0.90未満、または結果なし";continue;}
       if(candidate.key==='month')candidate.confirmed=printedMonth(check.text).length===1 && printedMonth(check.text)[0]===candidate.value;
       else {
         let text=normalize(check.text);
         if(candidate.label && text.startsWith(candidate.label.name))text=text.slice(candidate.label.name.length).replace(/^[:：]/,'');
         candidate.confirmed=parsePrintedAmount(text)===candidate.value;
       }
+      trace.reason=candidate.confirmed?"再読取一致（正確さの保証ではありません）":"初回と再読取の値が不一致・解釈不可";
     }
     const output=selectConfirmed(candidates);
+    diagnostic({phase:"OCR完了",width:data.width,height:data.height,fields:Object.fromEntries(['month','basic','gross','deductions','net'].map(key=>[key,{accepted:output.values[key]!==undefined,value:output.values[key],reason:output.values[key]!==undefined?"採用（原本との照合が必要）":!candidates.some(c=>c.key===key)?"候補なし：項目名・位置・初回確信度のどこで不成立かは検出文字を参照":"候補を除外、または同順位の値が競合",candidates:[...traces.values()].filter(c=>c.key===key)}])),items:result.items.slice(0,300).map(i=>({text:i.text,score:i.score,poly:i.poly})),totalItems:result.items.length});
     send('done',{value:{...output,metrics:{elapsedMs:Math.round(performance.now()-start),boxes:result.items.length,verified:verified.size,backend:'wasm-single-thread'}}});
   } catch(error) {
+    diagnostic({phase:phase+'で処理エラー'});
     send('error',{code:'OCR_FAILED'});
   } finally {
     source?.delete();

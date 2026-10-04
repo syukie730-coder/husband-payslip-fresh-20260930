@@ -20,11 +20,12 @@ function documentCrop(image){
  const crop=document.createElement('canvas'),sourceX=Math.round(x1/scale),sourceY=Math.round(y1/scale),sourceW=Math.min(width-sourceX,Math.round((x2-x1)/scale)),sourceH=Math.min(height-sourceY,Math.round((y2-y1)/scale));const cropScale=Math.min(1,2600/Math.max(sourceW,sourceH));crop.width=Math.round(sourceW*cropScale);crop.height=Math.round(sourceH*cropScale);crop.getContext('2d').drawImage(image,sourceX,sourceY,sourceW,sourceH,0,0,crop.width,crop.height);sample.width=sample.height=1;return crop;
 }
 export async function prepareImage(file,signal){
- if(file.size>50*1024*1024)throw new Error('画像が大きすぎます');let blob=file,img;
- try{img=await decode(blob,signal);}catch(e){if(signal.aborted)throw e;const header=new TextDecoder('latin1').decode(await file.slice(0,80).arrayBuffer());if(!/\.hei[cf]$/i.test(file.name)&&!/hei[cf]/i.test(file.type)&&!/ftyp(heic|heix|hevc|hevx|mif1|msf1)/.test(header))throw e;blob=await isolated('heic',file,signal,null,45000);img=await decode(blob,signal);}
- if(signal.aborted)throw abortError();if(!img.naturalWidth||!img.naturalHeight)throw new Error('空の画像');const ocrSource=documentCrop(img);const result={storedImage:imageDataURL(img,2200,.86),ocrImage:imageDataURL(ocrSource,2600,.96)};if(ocrSource!==img)ocrSource.width=ocrSource.height=1;img.src='';return result;
+ if(file.size>50*1024*1024)throw new Error('画像が大きすぎます');let blob=file,img,converted=false;
+ try{img=await decode(blob,signal);}catch(e){if(signal.aborted)throw e;const header=new TextDecoder('latin1').decode(await file.slice(0,80).arrayBuffer());if(!/\.hei[cf]$/i.test(file.name)&&!/hei[cf]/i.test(file.type)&&!/ftyp(heic|heix|hevc|hevx|mif1|msf1)/.test(header))throw e;converted=true;blob=await isolated('heic',file,signal,null,45000);img=await decode(blob,signal);}
+ if(signal.aborted)throw abortError();if(!img.naturalWidth||!img.naturalHeight)throw new Error('空の画像');const ocrSource=documentCrop(img);const result={diagnostics:{fileType:file.type||"不明",bytes:file.size,decoded:sizeOf(img),crop:sizeOf(ocrSource),decoder:converted?"HEIC変換部品":"ブラウザ標準",version:"診断版1"},storedImage:imageDataURL(img,2200,.86),ocrImage:imageDataURL(ocrSource,2600,.96)};if(ocrSource!==img)ocrSource.width=ocrSource.height=1;img.src='';return result;
 }
-export async function recognize(image,signal,onProgress){
+export async function recognize(image,signal,onProgress,onDiagnostic){
+ const diagnostic=value=>{try{onDiagnostic?.(value);}catch{}};
  if(signal.aborted)throw abortError();
  const source=await decode(new Blob([Uint8Array.from(atob(image.split(',')[1]),c=>c.charCodeAt(0))],{type:'image/jpeg'}),signal);
  const bitmap=source;
@@ -33,14 +34,14 @@ export async function recognize(image,signal,onProgress){
  const pixels=ctx.getImageData(0,0,c.width,c.height);c.width=c.height=1;
  return new Promise((resolve,reject)=>{
   if(signal.aborted){reject(abortError());return;}
-  const worker=new Worker(new URL('./paddle-worker.js?v=20261001-paddle1',import.meta.url),{type:'module'});
+  const worker=new Worker(new URL('./paddle-worker.js?v=20261004-diagnostic1',import.meta.url),{type:'module'});
   const job=crypto.randomUUID();let finished=false;
-  const finish=(error,value)=>{if(finished)return;finished=true;clearTimeout(timer);signal.removeEventListener('abort',abort);worker.terminate();error?reject(error):resolve(value);};
+  const finish=(error,value)=>{if(finished)return;finished=true;clearTimeout(timer);signal.removeEventListener('abort',abort);worker.terminate();if(error)diagnostic({phase:error.name==='AbortError'?'中止':error.message==='OCR_TIMEOUT'?'OCR時間切れ':'OCR処理エラー'});error?reject(error):resolve(value);};
   const abort=()=>finish(abortError());
   const timer=setTimeout(()=>finish(new Error('OCR_TIMEOUT')),120000);
   signal.addEventListener('abort',abort,{once:true});
   worker.onerror=()=>finish(new Error('OCR_FAILED'));
-  worker.onmessage=({data})=>{if(data.job!==job)return;if(data.type==='progress')onProgress?.(data.text);if(data.type==='done')finish(null,data.value.values);if(data.type==='error')finish(new Error(data.code||'OCR_FAILED'));};
+  worker.onmessage=({data})=>{if(data.job!==job)return;if(data.type==='diagnostic')diagnostic(data.value);if(data.type==='progress')onProgress?.(data.text);if(data.type==='done')finish(null,data.value.values);if(data.type==='error')finish(new Error(data.code||'OCR_FAILED'));};
   worker.postMessage({job,pixels:pixels.data.buffer,width:pixels.width,height:pixels.height},[pixels.data.buffer]);
  });
 }
